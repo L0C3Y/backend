@@ -1,7 +1,7 @@
 // backend/routes/auth.js
 const express = require("express");
 const router = express.Router();
-const bcrypt = require("bcryptjs"); // <- switched from 'bcrypt'
+const bcrypt = require("bcrypt"); // not bcryptjs
 const jwt = require("jsonwebtoken");
 const { supabase } = require("../supabase");
 const { asyncHandler, body, validate } = require("./middleware");
