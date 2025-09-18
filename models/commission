@@ -1,0 +1,63 @@
+const mongoose = require("mongoose");
+
+const commissionSchema = new mongoose.Schema({
+  commissionId: {
+    type: String,
+    required: true,
+    unique: true,
+    index: true
+  },
+  affiliateId: {
+    type: String,
+    required: true,
+    ref: "Affiliate",
+    index: true
+  },
+  orderId: {
+    type: String,
+    required: true,
+    ref: "Order",
+    index: true
+  },
+  paymentId: {
+    type: String,
+    required: true,
+    ref: "Payment",
+    index: true
+  },
+  amount: {
+    type: Number,
+    required: true,
+    min: [0, "Commission amount cannot be negative"]
+  },
+  commissionRate: {
+    type: Number,
+    required: true,
+    min: [0, "Commission rate cannot be negative"],
+    max: [100, "Commission rate cannot exceed 100%"]
+  },
+  status: {
+    type: String,
+    enum: ["pending", "approved", "paid", "cancelled", "hold"],
+    default: "pending",
+    index: true
+  },
+  paidAt: Date,
+  paymentMethod: String,
+  paymentReference: String,
+  approvedAt: Date,
+  approvedBy: String,
+  holdReason: String,
+  notes: String,
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now }
+}, {
+  timestamps: true
+});
+
+// Indexes for better performance
+commissionSchema.index({ affiliateId: 1, status: 1, createdAt: -1 });
+
+const Commission = mongoose.model("Commission", commissionSchema);
+
+module.exports = Commission;
