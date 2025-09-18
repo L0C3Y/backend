@@ -1,7 +1,7 @@
 // backend/routes/auth.js
 const express = require("express");
 const router = express.Router();
-const bcrypt = require("bcrypt");
+const bcrypt = require("bcryptjs"); // <- switched from 'bcrypt'
 const jwt = require("jsonwebtoken");
 const { supabase } = require("../supabase");
 const { asyncHandler, body, validate } = require("./middleware");
@@ -26,7 +26,7 @@ router.post(
     if (existingUser)
       return res.status(400).json({ success: false, error: "Email already registered" });
 
-    const hashedPassword = await bcrypt.hash(password, 10);
+    const hashedPassword = await bcrypt.hash(password, 10); // works with bcryptjs
 
     const { data, error } = await supabase
       .from("users")
