@@ -1,5 +1,3 @@
-//backend/routes/middleware.js – Common helpers
-
 const jwt = require("jsonwebtoken");
 const { body, param, validationResult } = require("express-validator");
 
@@ -15,14 +13,22 @@ const authMiddleware = (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = decoded;
+    req.user = decoded; // includes role and id
     next();
   } catch (err) {
     res.status(401).json({ success: false, error: "Invalid token" });
   }
 };
 
-// Validation
+// Admin-only middleware
+const adminMiddleware = (req, res, next) => {
+  if (!req.user?.role || req.user.role !== "admin") {
+    return res.status(403).json({ success: false, error: "Admin access only" });
+  }
+  next();
+};
+
+// Validation helper
 const validate = validations => async (req, res, next) => {
   await Promise.all(validations.map(validation => validation.run(req)));
   const errors = validationResult(req);
@@ -30,6 +36,4 @@ const validate = validations => async (req, res, next) => {
   next();
 };
 
-module.exports = { asyncHandler, authMiddleware, validate, body, param };
-
-
+module.exports = { asyncHandler, authMiddleware, adminMiddleware, validate, body, param };

@@ -1,17 +1,20 @@
 const express = require("express");
 const router = express.Router();
-const Transaction = require("../models/transaction");
-const Affiliate = require("../models/affiliates");
-const razorpay = require("../utils/razorpay");
 const crypto = require("crypto");
+const { supabase } = require("../utils/supabaseClient");
+const razorpay = require("../utils/razorpay");
 const { asyncHandler, authMiddleware, validate, body } = require("../middleware");
 const { sendAffiliateEmail } = require("../utils/email");
 
-// Create transaction / Razorpay order
+// ✅ Create transaction / Razorpay order
 router.post(
   "/create",
   authMiddleware,
-  validate([body("amount").isFloat({ min: 1 }), body("userName").notEmpty(), body("userEmail").notEmpty()]),
+  validate([
+    body("amount").isFloat({ min: 1 }),
+    body("userName").notEmpty(),
+    body("userEmail").notEmpty(),
+  ]),
   asyncHandler(async (req, res) => {
     const { amount, userName, userEmail, affiliateCode } = req.body;
 
@@ -21,33 +24,44 @@ router.post(
       currency: "INR",
       receipt: `txn_${Date.now()}`,
     };
-
     const razorpayOrder = await razorpay.orders.create(options);
 
-    // 2️⃣ Find affiliate if code exists
+    // 2️⃣ Find affiliate (if code exists)
     let affiliateId = null;
     if (affiliateCode) {
-      const affiliate = await Affiliate.findOne({ referral_code: affiliateCode });
-      if (affiliate) affiliateId = affiliate._id;
+      const { data: affiliate } = await supabase
+        .from("affiliates")
+        .select("id")
+        .eq("referral_code", affiliateCode)
+        .single();
+
+      if (affiliate) affiliateId = affiliate.id;
     }
 
-    // 3️⃣ Save transaction in DB
-    const txn = await Transaction.create({
-      affiliateId,
-      code: affiliateCode || null,
-      userName,
-      userEmail,
-      amount,
-      currency: "INR",
-      razorpay_order_id: razorpayOrder.id,
-      status: "pending",
-    });
+    // 3️⃣ Save transaction in Supabase
+    const { data: txn, error } = await supabase
+      .from("transactions")
+      .insert([
+        {
+          affiliate_id: affiliateId,
+          referral_code: affiliateCode || null,
+          user_email: userEmail,
+          amount,
+          currency: "INR",
+          razorpay_order_id: razorpayOrder.id,
+          status: "pending",
+        },
+      ])
+      .select()
+      .single();
+
+    if (error) throw error;
 
     res.json({ success: true, razorpayOrder, transaction: txn });
   })
 );
 
-// Verify payment
+// ✅ Verify payment
 router.post(
   "/verify",
   authMiddleware,
@@ -60,6 +74,7 @@ router.post(
   asyncHandler(async (req, res) => {
     const { razorpay_order_id, razorpay_payment_id, razorpay_signature, transactionId } = req.body;
 
+    // 1️⃣ Verify signature
     const digest = crypto
       .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
       .update(`${razorpay_order_id}|${razorpay_payment_id}`)
@@ -69,25 +84,32 @@ router.post(
       return res.status(400).json({ success: false, error: "Payment verification failed" });
     }
 
-    // Update transaction status
-    const txn = await Transaction.findByIdAndUpdate(
-      transactionId,
-      {
+    // 2️⃣ Update transaction status
+    const { data: txn, error } = await supabase
+      .from("transactions")
+      .update({
         status: "completed",
         razorpay_payment_id,
-        razorpay_signature,
-      },
-      { new: true }
-    );
+      })
+      .eq("id", transactionId)
+      .select()
+      .single();
 
-    // Notify affiliate if exists
-    if (txn.affiliateId) {
-      const affiliate = await Affiliate.findById(txn.affiliateId);
+    if (error) throw error;
+
+    // 3️⃣ Notify affiliate if exists
+    if (txn.affiliate_id) {
+      const { data: affiliate } = await supabase
+        .from("affiliates")
+        .select("email, name")
+        .eq("id", txn.affiliate_id)
+        .single();
+
       if (affiliate) {
         await sendAffiliateEmail(
           affiliate.email,
           affiliate.name,
-          txn.userName,
+          txn.user_email,
           txn.amount,
           new Date().toISOString()
         );
@@ -98,14 +120,23 @@ router.post(
   })
 );
 
-// Get transactions (for dashboard)
+// ✅ Get transactions (for dashboard)
 router.get(
   "/all",
   authMiddleware,
   asyncHandler(async (req, res) => {
-    const txns = await Transaction.find()
-      .populate("affiliateId", "name email referral_code")
-      .sort({ createdAt: -1 });
+    const { data: txns, error } = await supabase
+      .from("transactions")
+      .select(
+        `
+        *,
+        affiliates(name, email, referral_code)
+      `
+      )
+      .order("created_at", { ascending: false });
+
+    if (error) throw error;
+
     res.json({ success: true, transactions: txns });
   })
 );

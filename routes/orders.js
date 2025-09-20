@@ -1,106 +1,105 @@
+// backend/routes/order.js
 const express = require("express");
 const router = express.Router();
-const Orders = require("../models/orders");
-const razorpay = require("../utils/razorpay");
-const crypto = require("crypto");
-const { asyncHandler, authMiddleware, validate, body } = require("../middleware");
 const { supabase } = require("../supabase");
-const { sendAffiliateEmail } = require("../utils/email");
+const { sendEmail } = require("../utils/email");
 
-// Create order
-router.post(
-  "/create",
-  authMiddleware,
-  validate([
-    body("userId").notEmpty(),
-    body("ebookId").notEmpty(),
-    body("amount").isFloat({ min: 1 }),
-  ]),
-  asyncHandler(async (req, res) => {
-    const { userId, ebookId, amount, affiliateCode } = req.body;
+// --- Create Order ---
+router.post("/create", async (req, res) => {
+  try {
+    const { userId, ebookId, amount, affiliateCode, currency } = req.body;
 
-    // Razorpay order
-    const options = {
-      amount: amount * 100,
-      currency: "INR",
-      receipt: `ebook_${ebookId}_${Date.now()}`,
-    };
-    const razorpayOrder = await razorpay.orders.create(options);
+    const { data, error } = await supabase
+      .from("orders")
+      .insert([{
+        user_id: userId,
+        ebook_id: ebookId,
+        amount,
+        currency: currency || "INR",
+        affiliate_code: affiliateCode || null,
+        status: "pending"
+      }])
+      .select()
+      .single();
 
-    // Create DB order
-    const dbOrder = await Orders.createOrder(userId, ebookId, amount, affiliateCode);
+    if (error) throw error;
+    res.json(data);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to create order" });
+  }
+});
 
-    res.json({ success: true, razorpayOrder, dbOrder });
-  })
-);
+// --- Update Order Status ---
+router.post("/update-status", async (req, res) => {
+  try {
+    const { orderId, status, paymentData } = req.body;
 
-// Verify payment
-router.post(
-  "/verify",
-  authMiddleware,
-  validate([
-    body("razorpay_order_id").notEmpty(),
-    body("razorpay_payment_id").notEmpty(),
-    body("razorpay_signature").notEmpty(),
-    body("orderId").notEmpty(),
-  ]),
-  asyncHandler(async (req, res) => {
-    const { razorpay_order_id, razorpay_payment_id, razorpay_signature, orderId } = req.body;
+    const { data: order, error } = await supabase
+      .from("orders")
+      .update({
+        status,
+        razorpay_order_id: paymentData?.razorpay_order_id || null,
+        razorpay_payment_id: paymentData?.razorpay_payment_id || null,
+        razorpay_signature: paymentData?.razorpay_signature || null,
+      })
+      .eq("id", orderId)
+      .select()
+      .single();
 
-    const digest = crypto
-      .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
-      .update(`${razorpay_order_id}|${razorpay_payment_id}`)
-      .digest("hex");
+    if (error) throw error;
 
-    if (digest !== razorpay_signature) {
-      return res.status(400).json({ success: false, error: "Payment verification failed" });
+    // ⚡ If order was paid and has affiliate → send email
+    if (status === "paid" && order.affiliate_code) {
+      await notifyAffiliate(order);
     }
 
-    // Update order status
-    const updatedOrder = await Orders.updateOrderStatus(orderId, "completed", {
-      razorpay_order_id,
-      razorpay_payment_id,
-      razorpay_signature,
-    });
+    res.json(order);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to update order status" });
+  }
+});
 
-    // Notify affiliate if exists
-    if (updatedOrder.affiliate_code) {
-      const { data: affiliate } = await supabase
-        .from("affiliates")
-        .select("*")
-        .eq("referral_code", updatedOrder.affiliate_code)
-        .single();
+// --- Helper function ---
+async function notifyAffiliate(order) {
+  try {
+    // Get affiliate info
+    const { data: affiliate } = await supabase
+      .from("affiliates")
+      .select("name, email")
+      .eq("code", order.affiliate_code)
+      .single();
 
-      if (affiliate) {
-        // Get buyer info from user table (assuming you have a users table)
-        const { data: buyer } = await supabase
-          .from("users")
-          .select("name, email")
-          .eq("id", updatedOrder.user_id)
-          .single();
+    if (!affiliate) return;
 
-        await sendAffiliateEmail(
-          affiliate.email,
-          affiliate.name,
-          buyer?.name || "Unknown",
-          updatedOrder.amount,
-          new Date().toISOString()
-        );
-      }
-    }
+    // Get buyer info
+    const { data: buyer } = await supabase
+      .from("users")
+      .select("name")
+      .eq("id", order.user_id)
+      .single();
 
-    res.json({ success: true, data: updatedOrder });
-  })
-);
+    const buyerName = buyer?.name || "Anonymous";
 
-// Get user orders
-router.get(
-  "/user/:userId",
-  authMiddleware,
-  asyncHandler(async (req, res) => {
-    const orders = await Orders.getOrdersByUser(req.params.userId);
-    res.json({ success: true, data: orders });
-  })
-);
+    // Prepare email
+    const subject = "🎉 New Sale Registered!";
+    const html = `
+      <h2>Hello ${affiliate.name},</h2>
+      <p>You just earned a commission from a new sale!</p>
+      <ul>
+        <li><strong>Buyer:</strong> ${buyerName}</li>
+        <li><strong>Amount:</strong> ₹${order.amount}</li>
+        <li><strong>Time:</strong> ${new Date(order.created_at).toLocaleString()}</li>
+      </ul>
+      <p>Keep up the great work 🚀</p>
+      <p>- Snowstorm Team</p>
+    `;
+
+    await sendEmail(affiliate.email, subject, html);
+  } catch (err) {
+    console.error("Affiliate email failed:", err);
+  }
+}
 
 module.exports = router;
