@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { sendEmail } = require('./backend/utils/email');
+const { sendAffiliateEmail, sendEbookEmail } = require("./email"); // if test.js is inside backend folder
 const Razorpay = require('razorpay');
 
 (async () => {
