@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { sendEmail } = require('./backend/email');
+const { sendEmail } = require('./backend/utils/email');
 const Razorpay = require('razorpay');
 
 (async () => {
