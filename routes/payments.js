@@ -1,10 +1,10 @@
-// backend/routes/payments.js
 const express = require("express");
 const router = express.Router();
 const Razorpay = require("razorpay");
 const crypto = require("crypto");
 const authMiddleware = require("../middleware/auth");
-const pool = require("../db"); // postgres / supabase client
+const pool = require("../db"); // postgres client
+const { sendAffiliateEmail, sendEbookEmail } = require("../utils/email");
 
 // Razorpay instance
 const razorpay = new Razorpay({
@@ -13,7 +13,17 @@ const razorpay = new Razorpay({
 });
 
 // ------------------------
-// Get Razorpay public key
+// CORS for frontend
+// ------------------------
+router.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "https://snowstrom.shop");
+  res.header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  next();
+});
+
+// ------------------------
+// Public: Get Razorpay key
 // ------------------------
 router.get("/key", (req, res) => {
   res.json({ key: process.env.RAZORPAY_KEY_ID });
@@ -27,41 +37,32 @@ router.post("/create-order", authMiddleware, async (req, res) => {
     const { amount, ebookId, affiliateCode } = req.body;
     const userId = req.user.id;
 
-    // Fetch affiliate ID and commission rate if provided
-    let affiliateId = null;
-    let commissionRate = 0.3; // default 30%
+    // Fetch affiliate info if code provided
+    let affiliate = null;
     if (affiliateCode) {
-      const aff = await pool.query(
-        "SELECT id, commission_rate FROM affiliates WHERE referral_code=$1 AND active=true",
+      const affRes = await pool.query(
+        "SELECT id, commission_rate, name, email, referral_link FROM affiliates WHERE referral_code=$1 AND active=true",
         [affiliateCode]
       );
-      if (aff.rows.length) {
-        affiliateId = aff.rows[0].id;
-        commissionRate = aff.rows[0].commission_rate;
-      }
+      if (affRes.rows.length) affiliate = affRes.rows[0];
     }
 
-    // Razorpay order creation
     const options = {
-      amount: Math.round(amount * 100), // amount in paise
+      amount: amount * 100, // in paise
       currency: "INR",
-      receipt: `rcpt_${Date.now()}`,
+      receipt: rcpt_${Date.now()},
     };
+
     const razorpayOrder = await razorpay.orders.create(options);
 
-    // Save transaction in DB
-    const orderRes = await pool.query(
-      `INSERT INTO transactions 
-       (affiliate_id, user_id, amount, currency, razorpay_order_id, status, commission_rate)
-       VALUES ($1,$2,$3,$4,$5,'created',$6) RETURNING *`,
-      [affiliateId, userId, amount, "INR", razorpayOrder.id, commissionRate]
+    // Save transaction
+    const trxRes = await pool.query(
+      `INSERT INTO transactions (affiliate_id, user_id, amount, currency, razorpay_order_id, status)
+       VALUES ($1,$2,$3,$4,$5,'created') RETURNING *`,
+      [affiliate ? affiliate.id : null, userId, amount, "INR", razorpayOrder.id]
     );
 
-    res.json({
-      success: true,
-      razorpayOrder,
-      order: orderRes.rows[0],
-    });
+    res.json({ success: true, razorpayOrder, order: trxRes.rows[0] });
   } catch (err) {
     console.error("Create order error:", err);
     res.status(500).json({ success: false, error: err.message });
@@ -69,48 +70,65 @@ router.post("/create-order", authMiddleware, async (req, res) => {
 });
 
 // ------------------------
-// Verify payment
+// Verify payment & distribute commission
 // ------------------------
 router.post("/verify", authMiddleware, async (req, res) => {
   try {
     const { razorpay_order_id, razorpay_payment_id, razorpay_signature, orderId } = req.body;
 
-    // Verify signature
+    // Signature validation
     const generated_signature = crypto
       .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
-      .update(`${razorpay_order_id}|${razorpay_payment_id}`)
+      .update(razorpay_order_id + "|" + razorpay_payment_id)
       .digest("hex");
 
     if (generated_signature !== razorpay_signature)
-      return res.json({ success: false, error: "Invalid signature" });
+      return res.status(400).json({ success: false, error: "Invalid signature" });
 
-    // Fetch transaction to calculate affiliate commission
-    const txRes = await pool.query("SELECT * FROM transactions WHERE id=$1", [orderId]);
-    if (!txRes.rows.length) return res.status(404).json({ success: false, error: "Transaction not found" });
-    const tx = txRes.rows[0];
+    // Fetch transaction & affiliate
+    const trxRes = await pool.query(
+      `SELECT t.id, t.amount, t.affiliate_id, a.commission_rate, a.email, a.name
+       FROM transactions t
+       LEFT JOIN affiliates a ON t.affiliate_id = a.id
+       WHERE t.id=$1`,
+      [orderId]
+    );
 
-    // Mark transaction as paid
+    if (!trxRes.rows.length) return res.status(404).json({ success: false, error: "Transaction not found" });
+
+    const trx = trxRes.rows[0];
+    const commission = trx.affiliate_id ? trx.amount * trx.commission_rate : 0;
+
+    // Update transaction & affiliate metrics
     await pool.query(
-      `UPDATE transactions 
-       SET status='paid', razorpay_payment_id=$1, paid_at=NOW() 
-       WHERE id=$2`,
+      UPDATE transactions SET status='paid', razorpay_payment_id=$1 WHERE id=$2,
       [razorpay_payment_id, orderId]
     );
 
-    // Update affiliate stats if applicable
-    if (tx.affiliate_id) {
-      const commissionAmount = tx.amount * tx.commission_rate;
+    if (trx.affiliate_id) {
       await pool.query(
-        `UPDATE affiliates 
-         SET sales_count = sales_count + 1,
-             total_revenue = total_revenue + $1,
-             total_commission = total_commission + $2
+        `UPDATE affiliates
+         SET total_commission = total_commission + $1,
+             total_revenue = total_revenue + $2,
+             sales_count = sales_count + 1
          WHERE id=$3`,
-        [tx.amount, commissionAmount, tx.affiliate_id]
+        [commission, trx.amount, trx.affiliate_id]
       );
+
+      // Optional: send affiliate notification email
+      await sendAffiliateEmail({
+        to: trx.email,
+        affiliateName: trx.name,
+        buyerName: req.user.name,
+        commission,
+        date: new Date(),
+      });
     }
 
-    res.json({ success: true, message: "Payment verified and commission applied" });
+    // Optional: send ebook email to buyer
+    await sendEbookEmail({ to: req.user.email, ebookId: req.body.ebookId });
+
+    res.json({ success: true, commission });
   } catch (err) {
     console.error("Verify payment error:", err);
     res.status(500).json({ success: false, error: err.message });
