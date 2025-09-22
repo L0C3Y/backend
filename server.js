@@ -1,10 +1,11 @@
 // backend/server.js
-require("dotenv").config();
+require("dotenv").config(); // MUST be the very first line
 const express = require("express");
 const cors = require("cors");
 const jwt = require("jsonwebtoken");
 const Razorpay = require("razorpay");
-const pool = require("./db"); // Your PostgreSQL/Supabase client
+const crypto = require("crypto");
+const pool = require("./db"); // PostgreSQL/Supabase client
 
 // Routes
 const authRoutes = require("./routes/auth");
@@ -19,7 +20,7 @@ const app = express();
 // Middleware
 app.use(express.json());
 
-// ✅ CORS configuration for production
+// ✅ CORS configuration
 const allowedOrigins = [
   "https://snowstrom.shop",
   "http://localhost:3000",
@@ -36,7 +37,7 @@ app.use(
   })
 );
 
-// JWT middleware for protected routes
+// JWT middleware
 const authMiddleware = (req, res, next) => {
   const token = req.headers.authorization?.split(" ")[1];
   if (!token) return res.status(401).json({ success: false, error: "No token provided" });
@@ -48,6 +49,12 @@ const authMiddleware = (req, res, next) => {
     return res.status(401).json({ success: false, error: "Invalid token" });
   }
 };
+
+// ✅ Check environment variables
+if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
+  console.error("❌ Razorpay keys missing! Please check .env or hosting env vars.");
+  process.exit(1); // stop server
+}
 
 // Razorpay instance
 const razorpay = new Razorpay({
@@ -73,7 +80,7 @@ app.post("/api/payments/create-order", authMiddleware, async (req, res) => {
     const { amount, ebookId, affiliateCode } = req.body;
     const userId = req.user.id;
 
-    // Fetch affiliate ID if code is provided
+    // Affiliate lookup
     let affiliateId = null;
     if (affiliateCode) {
       const aff = await pool.query("SELECT id FROM affiliates WHERE code=$1", [affiliateCode]);
@@ -82,12 +89,12 @@ app.post("/api/payments/create-order", authMiddleware, async (req, res) => {
 
     // Create Razorpay order
     const razorpayOrder = await razorpay.orders.create({
-      amount: amount * 100, // in paise
+      amount: amount * 100, // amount in paise
       currency: "INR",
       receipt: `rcpt_${Date.now()}`,
     });
 
-    // Insert transaction
+    // Insert transaction in DB
     const orderRes = await pool.query(
       `INSERT INTO transactions (affiliate_id, user_id, amount, currency, razorpay_order_id, status)
        VALUES ($1,$2,$3,$4,$5,'created') RETURNING *`,
@@ -104,7 +111,6 @@ app.post("/api/payments/create-order", authMiddleware, async (req, res) => {
 app.post("/api/payments/verify", authMiddleware, async (req, res) => {
   try {
     const { razorpay_order_id, razorpay_payment_id, razorpay_signature, orderId } = req.body;
-    const crypto = require("crypto");
 
     const generated_signature = crypto
       .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
@@ -114,7 +120,6 @@ app.post("/api/payments/verify", authMiddleware, async (req, res) => {
     if (generated_signature !== razorpay_signature)
       return res.status(400).json({ success: false, error: "Invalid signature" });
 
-    // Update transaction status
     await pool.query(
       "UPDATE transactions SET status='paid', razorpay_payment_id=$1 WHERE id=$2",
       [razorpay_payment_id, orderId]
@@ -127,7 +132,7 @@ app.post("/api/payments/verify", authMiddleware, async (req, res) => {
   }
 });
 
-// ✅ Root test
+// Root test
 app.get("/", (req, res) => res.send("🚀 Backend running!"));
 
 // Start server

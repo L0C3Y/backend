@@ -17,12 +17,12 @@ const nodemailer = require("nodemailer");
     });
 
     // Buyer info
-    const buyerEmail = "devanshraj5120@gmail.com"; // must be valid
+    const buyerEmail = "yash2230awm@gmail.com"; // must be valid
     const buyerName = "Snow Buyer";
     const ebookFile = path.join(__dirname, "..", "secure", "prod1.pdf");
 
     // Affiliate info
-    const affiliateEmail = "devanshraj5120@gmail.com";
+    const affiliateEmail = "yash2230awm@gmail.com";
     const affiliateName = "Snow Affiliate";
     const commissionRate = 0.3;
     const saleAmount = 1000;
