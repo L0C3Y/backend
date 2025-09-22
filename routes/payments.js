@@ -2,7 +2,7 @@
 const express = require("express");
 const router = express.Router();
 const Razorpay = require("razorpay");
-const authMiddleware = require("../middleware/auth"); // JWT auth
+const authMiddleware = require("../middleware/auth"); // your JWT auth middleware
 const { supabase } = require("../db"); // Supabase client
 const crypto = require("crypto");
 
@@ -12,49 +12,46 @@ const razorpay = new Razorpay({
   key_secret: process.env.RAZORPAY_KEY_SECRET,
 });
 
-// ---------------------
-// Public: Get Razorpay key
-// ---------------------
+// ✅ Public endpoint for frontend: get Razorpay key
 router.get("/key", (req, res) => {
   res.json({ key: process.env.RAZORPAY_KEY_ID });
 });
 
-// ---------------------
-// Create Order
-// ---------------------
+// ✅ Create order (protected)
 router.post("/create-order", authMiddleware, async (req, res) => {
   try {
     const { amount, ebookId, affiliateCode } = req.body;
-    const userId = req.user.id;
+    const userId = req.user.id; // from JWT auth
 
-    // 1️⃣ Get affiliate ID if code provided
+    // Optional: get affiliate_id from code
     let affiliateId = null;
     if (affiliateCode) {
-      const { data, error } = await supabase
+      const { data: affData, error: affErr } = await supabase
         .from("affiliates")
         .select("id")
         .eq("code", affiliateCode)
         .single();
-      if (error && error.code !== "PGRST116") throw error; // ignore no rows error
-      if (data) affiliateId = data.id;
+
+      if (affErr) console.log("Affiliate fetch error:", affErr.message);
+      if (affData) affiliateId = affData.id;
     }
 
-    // 2️⃣ Create Razorpay order
+    // Create Razorpay order
     const options = {
-      amount: amount * 100, // in paise
+      amount: amount * 100, // paise
       currency: "INR",
       receipt: `rcpt_${Date.now()}`,
     };
     const razorpayOrder = await razorpay.orders.create(options);
 
-    // 3️⃣ Save transaction in Supabase
-    const { data: orderData, error: insertError } = await supabase
+    // Insert transaction in Supabase
+    const { data: orderRes, error } = await supabase
       .from("transactions")
       .insert([
         {
+          affiliate_id: affiliateId,
           user_id: userId,
           ebook_id: ebookId,
-          affiliate_id: affiliateId,
           amount,
           currency: "INR",
           razorpay_order_id: razorpayOrder.id,
@@ -63,24 +60,26 @@ router.post("/create-order", authMiddleware, async (req, res) => {
       ])
       .select()
       .single();
-    if (insertError) throw insertError;
 
-    res.json({ success: true, razorpayOrder, order: orderData });
+    if (error) throw error;
+
+    res.json({
+      success: true,
+      razorpayOrder,
+      order: orderRes,
+    });
   } catch (err) {
     console.error("Create order error:", err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// ---------------------
-// Verify Payment
-// ---------------------
+// ✅ Verify payment (protected)
 router.post("/verify", authMiddleware, async (req, res) => {
   try {
-    const { razorpay_order_id, razorpay_payment_id, razorpay_signature, orderId } =
-      req.body;
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature, orderId } = req.body;
 
-    // 1️⃣ Verify signature
+    // Verify Razorpay signature
     const generated_signature = crypto
       .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
       .update(razorpay_order_id + "|" + razorpay_payment_id)
@@ -89,31 +88,13 @@ router.post("/verify", authMiddleware, async (req, res) => {
     if (generated_signature !== razorpay_signature)
       return res.json({ success: false, error: "Invalid signature" });
 
-    // 2️⃣ Update transaction status
-    const { error: updateError, data: updated } = await supabase
+    // Update transaction as paid
+    const { error } = await supabase
       .from("transactions")
       .update({ status: "paid", razorpay_payment_id })
-      .eq("id", orderId)
-      .select()
-      .single();
-    if (updateError) throw updateError;
+      .eq("id", orderId);
 
-    // 3️⃣ Optionally calculate affiliate commission
-    if (updated.affiliate_id) {
-      // Fetch affiliate commission rate
-      const { data: aff, error: affError } = await supabase
-        .from("affiliates")
-        .select("commission_rate")
-        .eq("id", updated.affiliate_id)
-        .single();
-      if (affError) throw affError;
-
-      const commission = updated.amount * (aff.commission_rate || 0.3); // default 30%
-      await supabase
-        .from("transactions")
-        .update({ affiliate_commission: commission })
-        .eq("id", orderId);
-    }
+    if (error) throw error;
 
     res.json({ success: true });
   } catch (err) {
