@@ -1,24 +1,14 @@
-const sqlite3 = require("sqlite3").verbose();
-const db = new sqlite3.Database("./database.sqlite");
+// backend/db.js
+require("dotenv").config();
+const { createClient } = require("@supabase/supabase-js");
 
-// Init tables
-db.serialize(() => {
-  db.run(`CREATE TABLE IF NOT EXISTS ebooks (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    title TEXT,
-    description TEXT,
-    cover TEXT,
-    status TEXT, -- 'published' | 'upcoming'
-    releaseDate TEXT
-  )`);
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE; // service role key
 
-  db.run(`CREATE TABLE IF NOT EXISTS upcoming_registrations (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    ebook_id INTEGER,
-    email TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY(ebook_id) REFERENCES ebooks(id)
-  )`);
-});
+if (!supabaseUrl || !supabaseKey) {
+  throw new Error("Supabase environment variables are missing.");
+}
 
-module.exports = db;
+const supabase = createClient(supabaseUrl, supabaseKey);
+
+module.exports = { supabase };
