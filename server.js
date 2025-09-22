@@ -1,50 +1,26 @@
-// backend/server.js
+// backend/server.js (Supabase-compatible payments)
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const jwt = require("jsonwebtoken");
 const Razorpay = require("razorpay");
-const pool = require("./db"); // Your PostgreSQL/Supabase client
-
-// Routes
-const authRoutes = require("./routes/auth");
-const userRoutes = require("./routes/users");
-const ebookRoutes = require("./routes/ebooks");
-const affiliateRoutes = require("./routes/affiliates");
-const visitRoutes = require("./routes/visits");
-const feedbackRoutes = require("./routes/feedback");
+const { supabase } = require("./db"); // Supabase client
 
 const app = express();
 
 // Middleware
 app.use(express.json());
+const allowedOrigins = ["https://snowstrom.shop", "http://localhost:3000", "http://localhost:5173"];
+app.use(cors({ origin: (origin, cb) => cb(null, true), credentials: true }));
 
-// ✅ CORS configuration for production
-const allowedOrigins = [
-  "https://snowstrom.shop",
-  "http://localhost:3000",
-  "http://localhost:5173",
-];
-app.use(
-  cors({
-    origin: (origin, callback) => {
-      if (!origin || allowedOrigins.includes(origin)) callback(null, true);
-      else callback(new Error("Not allowed by CORS"));
-    },
-    credentials: true,
-    exposedHeaders: ["Authorization"],
-  })
-);
-
-// JWT middleware for protected routes
+// JWT middleware
 const authMiddleware = (req, res, next) => {
   const token = req.headers.authorization?.split(" ")[1];
   if (!token) return res.status(401).json({ success: false, error: "No token provided" });
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = decoded;
+    req.user = jwt.verify(token, process.env.JWT_SECRET);
     next();
-  } catch (err) {
+  } catch {
     return res.status(401).json({ success: false, error: "Invalid token" });
   }
 };
@@ -55,52 +31,60 @@ const razorpay = new Razorpay({
   key_secret: process.env.RAZORPAY_KEY_SECRET,
 });
 
-// Mount routes
-app.use("/api/auth", authRoutes);
-app.use("/api/users", userRoutes);
-app.use("/api/ebooks", ebookRoutes);
-app.use("/api/affiliates", affiliateRoutes);
-app.use("/api/visits", visitRoutes);
-app.use("/api/feedbacks", feedbackRoutes);
+// Get Razorpay key
+app.get("/api/payments/key", (req, res) => res.json({ key: process.env.RAZORPAY_KEY_ID }));
 
-// ✅ Payment routes
-app.get("/api/payments/key", (req, res) => {
-  res.json({ key: process.env.RAZORPAY_KEY_ID });
-});
-
+// Create order
 app.post("/api/payments/create-order", authMiddleware, async (req, res) => {
   try {
     const { amount, ebookId, affiliateCode } = req.body;
     const userId = req.user.id;
 
-    // Fetch affiliate ID if code is provided
+    // Get affiliate_id if code exists
     let affiliateId = null;
     if (affiliateCode) {
-      const aff = await pool.query("SELECT id FROM affiliates WHERE code=$1", [affiliateCode]);
-      if (aff.rows.length) affiliateId = aff.rows[0].id;
+      const { data: affs, error } = await supabase
+        .from("affiliates")
+        .select("id")
+        .eq("code", affiliateCode)
+        .single();
+      if (error) console.log(error);
+      else if (affs) affiliateId = affs.id;
     }
 
     // Create Razorpay order
     const razorpayOrder = await razorpay.orders.create({
-      amount: amount * 100, // in paise
+      amount: amount * 100,
       currency: "INR",
       receipt: `rcpt_${Date.now()}`,
     });
 
-    // Insert transaction
-    const orderRes = await pool.query(
-      `INSERT INTO transactions (affiliate_id, user_id, amount, currency, razorpay_order_id, status)
-       VALUES ($1,$2,$3,$4,$5,'created') RETURNING *`,
-      [affiliateId, userId, amount, "INR", razorpayOrder.id]
-    );
+    // Insert into Supabase
+    const { data: orderData, error: insertErr } = await supabase
+      .from("transactions")
+      .insert([
+        {
+          user_id: userId,
+          affiliate_id: affiliateId,
+          amount,
+          currency: "INR",
+          razorpay_order_id: razorpayOrder.id,
+          status: "created",
+        },
+      ])
+      .select()
+      .single();
 
-    res.json({ success: true, razorpayOrder, order: orderRes.rows[0] });
+    if (insertErr) throw insertErr;
+
+    res.json({ success: true, razorpayOrder, order: orderData });
   } catch (err) {
     console.error("Create order error:", err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
+// Verify payment
 app.post("/api/payments/verify", authMiddleware, async (req, res) => {
   try {
     const { razorpay_order_id, razorpay_payment_id, razorpay_signature, orderId } = req.body;
@@ -114,11 +98,13 @@ app.post("/api/payments/verify", authMiddleware, async (req, res) => {
     if (generated_signature !== razorpay_signature)
       return res.status(400).json({ success: false, error: "Invalid signature" });
 
-    // Update transaction status
-    await pool.query(
-      "UPDATE transactions SET status='paid', razorpay_payment_id=$1 WHERE id=$2",
-      [razorpay_payment_id, orderId]
-    );
+    // Update transaction in Supabase
+    const { error } = await supabase
+      .from("transactions")
+      .update({ status: "paid", razorpay_payment_id })
+      .eq("id", orderId);
+
+    if (error) throw error;
 
     res.json({ success: true });
   } catch (err) {
@@ -126,9 +112,6 @@ app.post("/api/payments/verify", authMiddleware, async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
-
-// ✅ Root test
-app.get("/", (req, res) => res.send("🚀 Backend running!"));
 
 // Start server
 const PORT = process.env.PORT || 5000;
