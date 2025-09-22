@@ -2,102 +2,70 @@
 const express = require("express");
 const router = express.Router();
 const Razorpay = require("razorpay");
-const { v4: uuidv4 } = require("uuid");
-require("dotenv").config();
+const authMiddleware = require("../middleware/auth"); // your JWT auth
+const pool = require("../db"); // postgres or supabase client
 
-// ✅ Supabase client (adjust if you already have it setup)
-const { createClient } = require("@supabase/supabase-js");
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE);
-
-// ✅ Initialize Razorpay
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID,
   key_secret: process.env.RAZORPAY_KEY_SECRET,
 });
 
-// -------------------------------------
-// GET Razorpay public key (public endpoint)
-// -------------------------------------
+// ✅ Public endpoint for frontend
 router.get("/key", (req, res) => {
-  if (!process.env.RAZORPAY_KEY_ID)
-    return res.status(500).json({ error: "Razorpay key missing" });
   res.json({ key: process.env.RAZORPAY_KEY_ID });
 });
 
-// -------------------------------------
-// POST Create order
-// -------------------------------------
-router.post("/create-order", async (req, res) => {
+// ✅ Create order — protected
+router.post("/create-order", authMiddleware, async (req, res) => {
   try {
     const { amount, ebookId, affiliateCode } = req.body;
-    const token = req.headers.authorization?.split(" ")[1];
+    const userId = req.user.id; // from authMiddleware
 
-    if (!token) return res.status(401).json({ error: "Unauthorized" });
+    // Optional: fetch affiliate_id from code if provided
+    let affiliateId = null;
+    if (affiliateCode) {
+      const aff = await pool.query(
+        "SELECT id FROM affiliates WHERE code=$1",
+        [affiliateCode]
+      );
+      if (aff.rows.length) affiliateId = aff.rows[0].id;
+    }
 
-    // ✅ Decode user from token (implement your JWT decode here)
-    const user = await decodeJWT(token); // implement decodeJWT to return { id: userId, name, email }
+    // If no affiliate, you can choose to allow null or block
+    if (!affiliateId) affiliateId = null; // or assign default
 
-    if (!user) return res.status(401).json({ error: "Invalid token" });
-
-    // ✅ Find affiliate by code
-    const { data: affiliates, error: affErr } = await supabase
-      .from("affiliates")
-      .select("*")
-      .eq("code", affiliateCode)
-      .limit(1);
-
-    if (affErr) throw affErr;
-
-    const affiliate = affiliates?.[0];
-
-    if (!affiliate)
-      return res.status(400).json({ error: "Invalid affiliate code" });
-
-    // ✅ Create Razorpay order
-    const razorpayOrder = await razorpay.orders.create({
+    const options = {
       amount: amount * 100, // in paise
       currency: "INR",
-      receipt: uuidv4(),
-      payment_capture: 1,
-    });
+      receipt: `rcpt_${Date.now()}`,
+    };
 
-    // ✅ Save transaction in Supabase
-    const { data: transaction, error: trxErr } = await supabase
-      .from("transactions")
-      .insert([
-        {
-          affiliate_id: affiliate.id,
-          user_id: user.id,
-          amount,
-          currency: "INR",
-          razorpay_order_id: razorpayOrder.id,
-          status: "created",
-        },
-      ])
-      .select()
-      .single();
+    const razorpayOrder = await razorpay.orders.create(options);
 
-    if (trxErr) throw trxErr;
+    // Save transaction in DB
+    const orderRes = await pool.query(
+      `INSERT INTO transactions (affiliate_id, user_id, amount, currency, razorpay_order_id, status)
+       VALUES ($1,$2,$3,$4,$5,'created') RETURNING *`,
+      [affiliateId, userId, amount, "INR", razorpayOrder.id]
+    );
 
     res.json({
       success: true,
       razorpayOrder,
-      order: transaction,
+      order: orderRes.rows[0],
     });
   } catch (err) {
     console.error("Create order error:", err);
-    res.status(500).json({ error: err.message || "Order creation failed" });
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// -------------------------------------
-// POST Verify payment
-// -------------------------------------
-router.post("/verify", async (req, res) => {
+// ✅ Verify payment — protected
+router.post("/verify", authMiddleware, async (req, res) => {
   try {
     const { razorpay_order_id, razorpay_payment_id, razorpay_signature, orderId } = req.body;
 
-    // ✅ Verify signature
+    // Verify signature
     const crypto = require("crypto");
     const generated_signature = crypto
       .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
@@ -105,15 +73,13 @@ router.post("/verify", async (req, res) => {
       .digest("hex");
 
     if (generated_signature !== razorpay_signature)
-      return res.status(400).json({ success: false, error: "Invalid signature" });
+      return res.json({ success: false, error: "Invalid signature" });
 
-    // ✅ Update transaction status
-    const { error } = await supabase
-      .from("transactions")
-      .update({ status: "paid", razorpay_payment_id })
-      .eq("id", orderId);
-
-    if (error) throw error;
+    // Update transaction as paid
+    await pool.query(
+      "UPDATE transactions SET status='paid', razorpay_payment_id=$1 WHERE id=$2",
+      [razorpay_payment_id, orderId]
+    );
 
     res.json({ success: true });
   } catch (err) {
@@ -123,16 +89,3 @@ router.post("/verify", async (req, res) => {
 });
 
 module.exports = router;
-
-// ------------------------------
-// Helper function to decode JWT
-// ------------------------------
-async function decodeJWT(token) {
-  const jwt = require("jsonwebtoken");
-  try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    return { id: decoded.id, email: decoded.email, name: decoded.name }; // adjust based on your JWT
-  } catch (err) {
-    return null;
-  }
-}
