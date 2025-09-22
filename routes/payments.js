@@ -2,10 +2,8 @@
 const express = require("express");
 const router = express.Router();
 const { supabase } = require("../supabase");
+const { body, validationResult } = require("express-validator");
 const jwt = require("jsonwebtoken");
-const { body, param, validationResult } = require("express-validator");
-const crypto = require("crypto");
-const Razorpay = require("razorpay");
 
 // ------------------
 // Middleware helpers
@@ -37,112 +35,72 @@ const authMiddleware = (req, res, next) => {
 };
 
 // ------------------
-// 1️⃣ Get Razorpay Key
-// ------------------
-router.get("/key", (req, res) => {
-  const key = process.env.RAZORPAY_KEY_ID;
-  if (!key) return res.status(500).json({ success: false, error: "Razorpay key not set" });
-  res.json({ key });
-});
-
-// ------------------
-// 2️⃣ Create Order
+// CREATE ORDER / TRANSACTION
 // ------------------
 router.post(
   "/create-order",
   authMiddleware,
   validate([
     body("amount").isNumeric({ min: 1 }),
+    body("currency").optional().isString(),
     body("ebookId").notEmpty(),
+    body("affiliateCode").optional().isString(),
   ]),
   asyncHandler(async (req, res) => {
-    const { amount, ebookId, affiliateCode } = req.body;
+    const { amount, currency = "INR", ebookId, affiliateCode } = req.body;
+    const user_id = req.user.id;
 
-    const razorpay = new Razorpay({
+    // 1️⃣ Resolve affiliateCode → affiliate_id
+    let affiliate_id = null;
+    if (affiliateCode) {
+      const { data: aff, error: affErr } = await supabase
+        .from("affiliates")
+        .select("id")
+        .eq("code", affiliateCode)
+        .maybeSingle();
+
+      if (affErr) return res.status(500).json({ success: false, error: affErr.message });
+      if (!aff) return res.status(400).json({ success: false, error: "Invalid affiliate code" });
+
+      affiliate_id = aff.id;
+    } else {
+      return res
+        .status(400)
+        .json({ success: false, error: "Affiliate code required for this table schema" });
+    }
+
+    // 2️⃣ Create Razorpay order
+    const Razorpay = require("razorpay");
+    const instance = new Razorpay({
       key_id: process.env.RAZORPAY_KEY_ID,
       key_secret: process.env.RAZORPAY_KEY_SECRET,
     });
 
-    const options = {
-      amount: amount * 100, // amount in paise
-      currency: "INR",
-      receipt: `rcpt_${Date.now()}`,
-    };
+    const razorpayOrder = await instance.orders.create({
+      amount: Math.round(amount * 100), // in paise
+      currency,
+      receipt: `ebook_${ebookId}_${Date.now()}`,
+    });
 
-    const razorpayOrder = await razorpay.orders.create(options);
-
-    // Save transaction in Supabase
-    const { data: txn, error } = await supabase
+    // 3️⃣ Insert transaction into DB
+    const { data: txn, error: txnErr } = await supabase
       .from("transactions")
-      .insert([{
-        user_id: req.user.id,
-        affiliate_id: affiliateCode || null,
-        amount,
-        currency: "INR",
-        status: "created",
-        razorpay_order_id: razorpayOrder.id,
-      }])
+      .insert([
+        {
+          affiliate_id,
+          user_id,
+          amount,
+          currency,
+          status: "created",
+          razorpay_order_id: razorpayOrder.id,
+        },
+      ])
       .select()
       .single();
 
-    if (error) return res.status(500).json({ success: false, error: error.message });
+    if (txnErr) return res.status(500).json({ success: false, error: txnErr.message });
 
     res.json({ success: true, razorpayOrder, order: txn });
-  })
-);
-
-// ------------------
-// 3️⃣ Verify Payment
-// ------------------
-router.post(
-  "/verify",
-  authMiddleware,
-  validate([
-    body("razorpay_order_id").notEmpty(),
-    body("razorpay_payment_id").notEmpty(),
-    body("razorpay_signature").notEmpty(),
-    body("orderId").notEmpty(),
-  ]),
-  asyncHandler(async (req, res) => {
-    const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
-
-    const generatedSignature = crypto
-      .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
-      .update(razorpay_order_id + "|" + razorpay_payment_id)
-      .digest("hex");
-
-    if (generatedSignature !== razorpay_signature)
-      return res.status(400).json({ success: false, error: "Invalid signature" });
-
-    // Update transaction as paid
-    const { data: txn, error } = await supabase
-      .from("transactions")
-      .update({ status: "paid", razorpay_payment_id })
-      .eq("razorpay_order_id", razorpay_order_id)
-      .select()
-      .single();
-
-    if (error) return res.status(500).json({ success: false, error: error.message });
-
-    // Update affiliate stats if exists
-    if (txn.affiliate_id) {
-      const { data: aff } = await supabase
-        .from("affiliates")
-        .select("*")
-        .eq("id", txn.affiliate_id)
-        .maybeSingle();
-
-      if (aff) {
-        const commission = txn.amount * (aff.commission_rate || 0.2);
-        await supabase.from("affiliates").update({
-          sales_count: (aff.sales_count || 0) + 1,
-          total_revenue: (aff.total_revenue || 0) + txn.amount,
-          total_commission: (aff.total_commission || 0) + commission,
-        }).eq("id", txn.affiliate_id);
-      }
-    }
-
-    res.json({ success: true, txn });
   })
 );
 
