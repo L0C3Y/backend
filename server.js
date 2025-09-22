@@ -27,6 +27,7 @@ app.use("/api/ebooks", ebookRoutes);
 app.use("/api/affiliates", affiliateRoutes);
 app.use("/api/visits", visitRoutes);
 app.use("/api/feedbacks", feedbackRoutes); // ✅ Feedback route
+app.post("/api/test", (req, res) => res.json({ ok: true }));
 
 // ✅ Root test route
 app.get("/", (req, res) => {

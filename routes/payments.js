@@ -1,7 +1,8 @@
 // backend/routes/payments.js
+require("dotenv").config();
 const express = require("express");
 const router = express.Router();
-const { supabase } = require("../supabase"); // your initialized Supabase client
+const { supabase } = require("../supabase");
 const { body, param, validationResult } = require("express-validator");
 const jwt = require("jsonwebtoken");
 
@@ -33,6 +34,15 @@ const authMiddleware = (req, res, next) => {
     res.status(401).json({ success: false, error: "Invalid token" });
   }
 };
+
+// ------------------
+// GET payment key (Stripe / Razorpay)
+// ------------------
+router.get("/key", (req, res) => {
+  // Replace with your Stripe or Razorpay key
+  const key = process.env.STRIPE_PUBLISHABLE_KEY || process.env.RAZORPAY_KEY;
+  res.json({ key });
+});
 
 // ------------------
 // Create payment / transaction
