@@ -4,7 +4,7 @@ const express = require("express");
 const cors = require("cors");
 const jwt = require("jsonwebtoken");
 const Razorpay = require("razorpay");
-const {supabase} = require("./db"); // Your PostgreSQL/Supabase client
+const pool = require("./db"); // Your PostgreSQL/Supabase client
 
 // Routes
 const authRoutes = require("./routes/auth");
