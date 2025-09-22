@@ -25,7 +25,8 @@
     "mongoose": "^8.18.0",
     "nanoid": "^5.1.5",
     "nodemailer": "^7.0.6",
-    "razorpay": "^2.9.6"
+    "razorpay": "^2.9.6",
+    "sqlite3": "^5.1.7"
   },
   "devDependencies": {
     "nodemon": "^3.1.10"
