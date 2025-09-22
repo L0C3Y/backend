@@ -1,9 +1,11 @@
 // backend/routes/payments.js
+require("dotenv").config();
 const express = require("express");
 const router = express.Router();
 const { supabase } = require("../supabase");
-const { body, validationResult } = require("express-validator");
 const jwt = require("jsonwebtoken");
+const { body, param, validationResult } = require("express-validator");
+const Razorpay = require("razorpay");
 
 // ------------------
 // Middleware helpers
@@ -35,72 +37,141 @@ const authMiddleware = (req, res, next) => {
 };
 
 // ------------------
-// CREATE ORDER / TRANSACTION
+// Razorpay client
+// ------------------
+const razorpay = new Razorpay({
+  key_id: process.env.RAZORPAY_KEY_ID,
+  key_secret: process.env.RAZORPAY_KEY_SECRET,
+});
+
+// ------------------
+// GET Razorpay key
+// ------------------
+router.get(
+  "/key",
+  asyncHandler(async (req, res) => {
+    if (!process.env.RAZORPAY_KEY_ID)
+      return res.status(500).json({ success: false, error: "Razorpay key missing" });
+    res.json({ key: process.env.RAZORPAY_KEY_ID });
+  })
+);
+
+// ------------------
+// Create order
 // ------------------
 router.post(
   "/create-order",
   authMiddleware,
   validate([
     body("amount").isNumeric({ min: 1 }),
-    body("currency").optional().isString(),
     body("ebookId").notEmpty(),
     body("affiliateCode").optional().isString(),
   ]),
   asyncHandler(async (req, res) => {
-    const { amount, currency = "INR", ebookId, affiliateCode } = req.body;
-    const user_id = req.user.id;
+    const { amount, ebookId, affiliateCode } = req.body;
+    let affiliate_id;
 
-    // 1️⃣ Resolve affiliateCode → affiliate_id
-    let affiliate_id = null;
+    // Resolve affiliate_id from code
     if (affiliateCode) {
-      const { data: aff, error: affErr } = await supabase
+      const { data: aff } = await supabase
         .from("affiliates")
         .select("id")
         .eq("code", affiliateCode)
         .maybeSingle();
 
-      if (affErr) return res.status(500).json({ success: false, error: affErr.message });
       if (!aff) return res.status(400).json({ success: false, error: "Invalid affiliate code" });
-
       affiliate_id = aff.id;
     } else {
-      return res
-        .status(400)
-        .json({ success: false, error: "Affiliate code required for this table schema" });
+      // Default system affiliate
+      affiliate_id = "00000000-0000-0000-0000-000000000000";
     }
 
-    // 2️⃣ Create Razorpay order
-    const Razorpay = require("razorpay");
-    const instance = new Razorpay({
-      key_id: process.env.RAZORPAY_KEY_ID,
-      key_secret: process.env.RAZORPAY_KEY_SECRET,
+    const user_id = req.user.id;
+
+    // Create Razorpay order
+    const razorpayOrder = await razorpay.orders.create({
+      amount: amount * 100, // in paise
+      currency: "INR",
+      receipt: `order_${Date.now()}`,
+      payment_capture: 1,
     });
 
-    const razorpayOrder = await instance.orders.create({
-      amount: Math.round(amount * 100), // in paise
-      currency,
-      receipt: `ebook_${ebookId}_${Date.now()}`,
-    });
-
-    // 3️⃣ Insert transaction into DB
-    const { data: txn, error: txnErr } = await supabase
+    // Insert transaction
+    const { data: txn, error } = await supabase
       .from("transactions")
-      .insert([
-        {
-          affiliate_id,
-          user_id,
-          amount,
-          currency,
-          status: "created",
-          razorpay_order_id: razorpayOrder.id,
-        },
-      ])
+      .insert([{
+        affiliate_id,
+        user_id,
+        amount,
+        currency: "INR",
+        status: "created",
+        razorpay_order_id: razorpayOrder.id,
+      }])
       .select()
       .single();
 
-    if (txnErr) return res.status(500).json({ success: false, error: txnErr.message });
+    if (error) return res.status(500).json({ success: false, error: error.message });
 
     res.json({ success: true, razorpayOrder, order: txn });
+  })
+);
+
+// ------------------
+// Verify payment
+// ------------------
+router.post(
+  "/verify",
+  authMiddleware,
+  validate([
+    body("razorpay_order_id").notEmpty(),
+    body("razorpay_payment_id").notEmpty(),
+    body("razorpay_signature").notEmpty(),
+    body("orderId").notEmpty(),
+  ]),
+  asyncHandler(async (req, res) => {
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature, orderId } = req.body;
+
+    // Signature verification
+    const crypto = require("crypto");
+    const hmac = crypto.createHmac("sha256", process.env.RAZORPAY_KEY_SECRET);
+    hmac.update(razorpay_order_id + "|" + razorpay_payment_id);
+    const generatedSignature = hmac.digest("hex");
+
+    if (generatedSignature !== razorpay_signature)
+      return res.status(400).json({ success: false, error: "Invalid signature" });
+
+    // Update transaction status
+    const { data: txn, error } = await supabase
+      .from("transactions")
+      .update({ status: "paid", razorpay_payment_id })
+      .eq("id", orderId)
+      .select()
+      .single();
+
+    if (error) return res.status(500).json({ success: false, error: error.message });
+
+    // Update affiliate stats
+    if (txn.affiliate_id && txn.affiliate_id !== "00000000-0000-0000-0000-000000000000") {
+      const { data: aff } = await supabase
+        .from("affiliates")
+        .select("*")
+        .eq("id", txn.affiliate_id)
+        .maybeSingle();
+
+      if (aff) {
+        const commission = txn.amount * (aff.commission_rate || 0.2);
+        await supabase
+          .from("affiliates")
+          .update({
+            sales_count: (aff.sales_count || 0) + 1,
+            total_revenue: (aff.total_revenue || 0) + txn.amount,
+            total_commission: (aff.total_commission || 0) + commission,
+          })
+          .eq("id", txn.affiliate_id);
+      }
+    }
+
+    res.json({ success: true, data: txn });
   })
 );
 
