@@ -1,18 +1,25 @@
 // backend/server.js
-require("dotenv").config(); // MUST be first
+require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const jwt = require("jsonwebtoken");
 const Razorpay = require("razorpay");
-const crypto = require("crypto");
-const { supabase } = require("./db"); // Supabase client
+const pool = require("./db"); // Your PostgreSQL/Supabase client
+
+// Routes
+const authRoutes = require("./routes/auth");
+const userRoutes = require("./routes/users");
+const ebookRoutes = require("./routes/ebooks");
+const affiliateRoutes = require("./routes/affiliates");
+const visitRoutes = require("./routes/visits");
+const feedbackRoutes = require("./routes/feedback");
 
 const app = express();
 
 // Middleware
 app.use(express.json());
 
-// ✅ CORS
+// ✅ CORS configuration for production
 const allowedOrigins = [
   "https://snowstrom.shop",
   "http://localhost:3000",
@@ -29,7 +36,7 @@ app.use(
   })
 );
 
-// JWT middleware
+// JWT middleware for protected routes
 const authMiddleware = (req, res, next) => {
   const token = req.headers.authorization?.split(" ")[1];
   if (!token) return res.status(401).json({ success: false, error: "No token provided" });
@@ -42,21 +49,21 @@ const authMiddleware = (req, res, next) => {
   }
 };
 
-// ✅ Razorpay instance
-if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
-  console.error("❌ Razorpay keys missing! Check .env or hosting env vars.");
-  process.exit(1);
-}
-
+// Razorpay instance
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID,
   key_secret: process.env.RAZORPAY_KEY_SECRET,
 });
 
-// Routes
-app.get("/", (req, res) => res.send("🚀 Backend running!"));
+// Mount routes
+app.use("/api/auth", authRoutes);
+app.use("/api/users", userRoutes);
+app.use("/api/ebooks", ebookRoutes);
+app.use("/api/affiliates", affiliateRoutes);
+app.use("/api/visits", visitRoutes);
+app.use("/api/feedbacks", feedbackRoutes);
 
-// Payment routes
+// ✅ Payment routes
 app.get("/api/payments/key", (req, res) => {
   res.json({ key: process.env.RAZORPAY_KEY_ID });
 });
@@ -66,17 +73,11 @@ app.post("/api/payments/create-order", authMiddleware, async (req, res) => {
     const { amount, ebookId, affiliateCode } = req.body;
     const userId = req.user.id;
 
-    // Lookup affiliate
+    // Fetch affiliate ID if code is provided
     let affiliateId = null;
     if (affiliateCode) {
-      const { data: affData, error: affError } = await supabase
-        .from("affiliates")
-        .select("id")
-        .eq("code", affiliateCode)
-        .single();
-
-      if (affError && affError.code !== "PGRST116") throw affError; // PGRST116 = no rows
-      affiliateId = affData?.id || null;
+      const aff = await pool.query("SELECT id FROM affiliates WHERE code=$1", [affiliateCode]);
+      if (aff.rows.length) affiliateId = aff.rows[0].id;
     }
 
     // Create Razorpay order
@@ -87,22 +88,13 @@ app.post("/api/payments/create-order", authMiddleware, async (req, res) => {
     });
 
     // Insert transaction
-    const { data: orderRes, error: insertError } = await supabase
-      .from("transactions")
-      .insert([{
-        affiliate_id: affiliateId,
-        user_id: userId,
-        amount: amount,
-        currency: "INR",
-        razorpay_order_id: razorpayOrder.id,
-        status: "created",
-      }])
-      .select()
-      .single();
+    const orderRes = await pool.query(
+      `INSERT INTO transactions (affiliate_id, user_id, amount, currency, razorpay_order_id, status)
+       VALUES ($1,$2,$3,$4,$5,'created') RETURNING *`,
+      [affiliateId, userId, amount, "INR", razorpayOrder.id]
+    );
 
-    if (insertError) throw insertError;
-
-    res.json({ success: true, razorpayOrder, order: orderRes });
+    res.json({ success: true, razorpayOrder, order: orderRes.rows[0] });
   } catch (err) {
     console.error("Create order error:", err);
     res.status(500).json({ success: false, error: err.message });
@@ -112,6 +104,7 @@ app.post("/api/payments/create-order", authMiddleware, async (req, res) => {
 app.post("/api/payments/verify", authMiddleware, async (req, res) => {
   try {
     const { razorpay_order_id, razorpay_payment_id, razorpay_signature, orderId } = req.body;
+    const crypto = require("crypto");
 
     const generated_signature = crypto
       .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
@@ -121,13 +114,11 @@ app.post("/api/payments/verify", authMiddleware, async (req, res) => {
     if (generated_signature !== razorpay_signature)
       return res.status(400).json({ success: false, error: "Invalid signature" });
 
-    // Update transaction
-    const { error: updateError } = await supabase
-      .from("transactions")
-      .update({ status: "paid", razorpay_payment_id })
-      .eq("id", orderId);
-
-    if (updateError) throw updateError;
+    // Update transaction status
+    await pool.query(
+      "UPDATE transactions SET status='paid', razorpay_payment_id=$1 WHERE id=$2",
+      [razorpay_payment_id, orderId]
+    );
 
     res.json({ success: true });
   } catch (err) {
@@ -136,13 +127,8 @@ app.post("/api/payments/verify", authMiddleware, async (req, res) => {
   }
 });
 
-// Other API routes
-app.use("/api/auth", require("./routes/auth"));
-app.use("/api/users", require("./routes/users"));
-app.use("/api/ebooks", require("./routes/ebooks"));
-app.use("/api/affiliates", require("./routes/affiliates"));
-app.use("/api/visits", require("./routes/visits"));
-app.use("/api/feedbacks", require("./routes/feedback"));
+// ✅ Root test
+app.get("/", (req, res) => res.send("🚀 Backend running!"));
 
 // Start server
 const PORT = process.env.PORT || 5000;
