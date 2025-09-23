@@ -64,6 +64,7 @@ router.post(
   validate([body("username").notEmpty(), body("password").notEmpty()]),
   asyncHandler(async (req, res) => {
     const { username, password } = req.body;
+
     if (
       username === process.env.ADMIN_USERNAME &&
       password === process.env.ADMIN_PASSWORD
@@ -72,6 +73,7 @@ router.post(
       const token = generateToken(user);
       return res.json({ success: true, user, token });
     }
+
     return res
       .status(401)
       .json({ success: false, error: "Invalid admin credentials" });
@@ -198,7 +200,8 @@ router.put(
     const updates = {};
     if (req.body.name) updates.name = req.body.name;
     if (req.body.email) updates.email = req.body.email;
-    if (req.body.commissionRate) updates.commission_rate = req.body.commissionRate;
+    if (req.body.commissionRate)
+      updates.commission_rate = req.body.commissionRate;
 
     const { data, error } = await supabase
       .from("affiliates")
@@ -270,7 +273,8 @@ router.post(
       .select()
       .single();
 
-    if (error) return res.status(500).json({ success: false, error: error.message });
+    if (error)
+      return res.status(500).json({ success: false, error: error.message });
 
     if (affiliate_id && (status === "paid" || status === "completed")) {
       const { data: aff } = await supabase
@@ -281,12 +285,14 @@ router.post(
 
       if (aff) {
         const commission = amount * (aff.commission_rate || 0.2);
-        await supabase.from("affiliates").update({
-          sales_count: (aff.sales_count || 0) + 1,
-          total_revenue: (aff.total_revenue || 0) + amount,
-          total_commission: (aff.total_commission || 0) + commission,
-        })
-        .eq("id", affiliate_id);
+        await supabase
+          .from("affiliates")
+          .update({
+            sales_count: (aff.sales_count || 0) + 1,
+            total_revenue: (aff.total_revenue || 0) + amount,
+            total_commission: (aff.total_commission || 0) + commission,
+          })
+          .eq("id", affiliate_id);
       }
     }
 
@@ -315,7 +321,8 @@ router.put(
       .select()
       .single();
 
-    if (error) return res.status(500).json({ success: false, error: error.message });
+    if (error)
+      return res.status(500).json({ success: false, error: error.message });
 
     if (txn.affiliate_id) {
       const { data: aff } = await supabase
@@ -326,12 +333,14 @@ router.put(
 
       if (aff && (status === "paid" || status === "completed")) {
         const commission = txn.amount * (aff.commission_rate || 0.2);
-        await supabase.from("affiliates").update({
-          sales_count: (aff.sales_count || 0) + 1,
-          total_revenue: (aff.total_revenue || 0) + txn.amount,
-          total_commission: (aff.total_commission || 0) + commission,
-        })
-        .eq("id", txn.affiliate_id);
+        await supabase
+          .from("affiliates")
+          .update({
+            sales_count: (aff.sales_count || 0) + 1,
+            total_revenue: (aff.total_revenue || 0) + txn.amount,
+            total_commission: (aff.total_commission || 0) + commission,
+          })
+          .eq("id", txn.affiliate_id);
       }
     }
 

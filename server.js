@@ -4,18 +4,29 @@ const express = require("express");
 const cors = require("cors");
 const jwt = require("jsonwebtoken");
 const Razorpay = require("razorpay");
-const { supabase } = require("./db"); // Supabase client
+
+// Import routers
+const affiliateRoutes = require("./routes/affiliates"); // ensure this path is correct
+
+// Supabase client
+const { supabase } = require("./db");
 
 const app = express();
 app.use(express.json());
 
+// -------------------
 // CORS
-const allowedOrigins = ["https://snowstrom.shop", "http://localhost:3000", "http://localhost:5173"];
-app.use(
-  cors({ origin: (origin, cb) => cb(null, true), credentials: true })
-);
+// -------------------
+const allowedOrigins = [
+  "https://snowstrom.shop",
+  "http://localhost:3000",
+  "http://localhost:5173",
+];
+app.use(cors({ origin: (origin, cb) => cb(null, true), credentials: true }));
 
+// -------------------
 // JWT middleware
+// -------------------
 const authMiddleware = (req, res, next) => {
   const token = req.headers.authorization?.split(" ")[1];
   if (!token) return res.status(401).json({ success: false, error: "No token provided" });
@@ -27,18 +38,21 @@ const authMiddleware = (req, res, next) => {
   }
 };
 
+// -------------------
 // Razorpay instance
+// -------------------
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID,
   key_secret: process.env.RAZORPAY_KEY_SECRET,
 });
 
-// GET Razorpay key
+// -------------------
+// Payments routes
+// -------------------
 app.get("/api/payments/key", (req, res) => {
   res.json({ key: process.env.RAZORPAY_KEY_ID });
 });
 
-// CREATE ORDER
 app.post("/api/payments/create-order", authMiddleware, async (req, res) => {
   try {
     const { amount, ebookId, affiliateCode } = req.body;
@@ -50,12 +64,12 @@ app.post("/api/payments/create-order", authMiddleware, async (req, res) => {
       const { data: affs } = await supabase
         .from("affiliates")
         .select("id")
-        .eq("code", affiliateCode)
-        .single();
+        .eq("referral_code", affiliateCode)
+        .maybeSingle();
       if (affs) affiliateId = affs.id;
     }
 
-    // Razorpay order
+    // Create Razorpay order
     const razorpayOrder = await razorpay.orders.create({
       amount: amount * 100,
       currency: "INR",
@@ -77,6 +91,7 @@ app.post("/api/payments/create-order", authMiddleware, async (req, res) => {
       .single();
 
     if (insertErr) throw insertErr;
+
     res.json({ success: true, razorpayOrder, order: orderData });
   } catch (err) {
     console.error("Create order error:", err);
@@ -84,7 +99,6 @@ app.post("/api/payments/create-order", authMiddleware, async (req, res) => {
   }
 });
 
-// VERIFY PAYMENT
 app.post("/api/payments/verify", authMiddleware, async (req, res) => {
   try {
     const { razorpay_order_id, razorpay_payment_id, razorpay_signature, orderId } = req.body;
@@ -112,8 +126,18 @@ app.post("/api/payments/verify", authMiddleware, async (req, res) => {
   }
 });
 
-// Root test
+// -------------------
+// Mount affiliates routes
+// -------------------
+app.use("/api/affiliates", affiliateRoutes);
+
+// -------------------
+// Root route
+// -------------------
 app.get("/", (req, res) => res.send("🚀 Backend running!"));
 
+// -------------------
+// Start server
+// -------------------
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
