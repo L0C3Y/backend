@@ -7,6 +7,7 @@ const Razorpay = require("razorpay");
 
 // Import routers
 const affiliateRoutes = require("./routes/affiliates"); // ensure this path is correct
+const authRoutes = require("./routes/auth"); // your login/register router
 
 // Supabase client
 const { supabase } = require("./db");
@@ -130,7 +131,7 @@ app.post("/api/payments/verify", authMiddleware, async (req, res) => {
 // Mount affiliates routes
 // -------------------
 app.use("/api/affiliates", affiliateRoutes);
-
+app.use("/api/auth", authRoutes);
 // -------------------
 // Root route
 // -------------------
