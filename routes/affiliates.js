@@ -1,3 +1,4 @@
+// backend/routes/affiliates.js
 const express = require("express");
 const router = express.Router();
 const { supabase } = require("../supabase"); // must export initialized supabase client
