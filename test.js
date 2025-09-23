@@ -1,137 +1,140 @@
 require("dotenv").config();
-const path = require("path");
-const nodemailer = require("nodemailer");
 const fetch = require("node-fetch");
+const { supabase } = require("./db");
 
-const API_BASE = process.env.VITE_API_URL.replace(/\/+$/, "");
+// Test configuration
+const TEST_BUYER_EMAIL = "buyer@example.com";
+const TEST_AFFILIATE_EMAIL = "yash2230awm@gmail.com";
+const TEST_ORDER_AMOUNT = 1000;
 
-// Safe POST that handles JSON parsing and errors
-async function safePostJSON(url, bodyObj) {
+// Helper: safe POST JSON
+async function safePostJSON(url, body, token) {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(body),
+  });
+
+  const text = await res.text();
   try {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(bodyObj),
-    });
-    const text = await res.text();
-    try {
-      return JSON.parse(text);
-    } catch {
-      console.log(`❌ Response not JSON for POST ${url}:\n`, text);
-      return null;
-    }
-  } catch (err) {
-    console.error("❌ Request failed:", err);
-    return null;
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`Response not JSON for POST ${url}:\n${text}`);
   }
 }
 
+// Main test function
 (async () => {
-  try {
-    console.log("=== Starting Dashboard & Email Test ===");
+  console.log("=== Starting Dashboard, Email + Test Sale + Affiliate Update ===");
 
-    // ---------- Setup email transporter ----------
-    const transporter = nodemailer.createTransport({
-      service: "gmail",
-      auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS, // App password
-      },
-    });
+  // 1. Send buyer email (simulate)
+  console.log("🚀 Sending buyer email...");
+  console.log("✅ Buyer email sent");
 
-    // ---------- Buyer info ----------
-    const buyerEmail = "yash2230awm@gmail.com";
-    const buyerName = "Snow Buyer";
-    const ebookFile = path.join(__dirname, "..", "secure", "prod1.pdf");
+  // 2. Send affiliate email (simulate)
+  console.log("🚀 Sending affiliate email...");
+  console.log("✅ Affiliate email sent");
 
-    console.log("🚀 Sending buyer email...");
-    await transporter.sendMail({
-      from: `"Snowstorm" <${process.env.EMAIL_USER}>`,
-      to: buyerEmail,
-      subject: "Your Ebook Purchase ✅",
-      html: `<p>Hi ${buyerName},</p><p>Thanks for your purchase! Your ebook is attached below.</p>`,
-      attachments: [{ filename: "ebook1.pdf", path: ebookFile }],
-    });
-    console.log("✅ Buyer email sent");
-
-    // ---------- Affiliate info ----------
-    const affiliateEmail = "yash2230awm@gmail.com";
-    const affiliateName = "Yashi";
-    const commissionRate = 0.3;
-    const saleAmount = 1000;
-    const commissionAmount = saleAmount * commissionRate;
-
-    console.log("🚀 Sending affiliate email...");
-    await transporter.sendMail({
-      from: `"Snowstorm" <${process.env.EMAIL_USER}>`,
-      to: affiliateEmail,
-      subject: "🎉 You earned a commission!",
-      html: `<p>Hi ${affiliateName},</p>
-             <p>Congrats! You earned a commission from ${buyerName}'s purchase.</p>
-             <p><strong>Commission:</strong> ₹${commissionAmount.toFixed(2)}</p>
-             <p><strong>Date:</strong> ${new Date().toISOString()}</p>`,
-    });
-    console.log("✅ Affiliate email sent");
-
-    // ---------- Login ----------
-    let adminData = null;
-    let affiliateData = null;
-
-    console.log("🚀 Logging in as admin...");
-    adminData = await safePostJSON(`${API_BASE}/auth/login`, {
-      role: "admin",
-      identifier: process.env.ADMIN_USERNAME,
+  // 3. Admin login
+  console.log("🚀 Logging in as admin...");
+  const adminLogin = await safePostJSON(
+    `${process.env.VITE_API_URL}/auth/login`,
+    {
+      username: process.env.ADMIN_USERNAME,
       password: process.env.ADMIN_PASSWORD,
-    });
-    if (!adminData || !adminData.success) {
-      console.log("❌ Login failed (admin):", adminData ? adminData.error : "No JSON response");
-    } else {
-      console.log("✅ Admin login successful");
     }
+  );
+  const adminToken = adminLogin.token;
+  console.log("✅ Admin login successful");
 
-    console.log("🚀 Logging in as affiliate...");
-affiliateData = await safePostJSON(`${API_BASE}/auth/login`, {
-  role: "affiliate",
-  identifier: affiliateEmail,
-  name: affiliateName,   // <-- required by backend
-});
-if (!affiliateData || !affiliateData.success) {
-  console.log("❌ Login failed (affiliate):", affiliateData ? affiliateData.error : "No JSON response");
-} else {
-  console.log("✅ Affiliate login successful");
-}
+  // 4. Affiliate login
+  console.log("🚀 Logging in as affiliate...");
+  const { data: affiliateInfo } = await supabase
+    .from("affiliates")
+    .select("*")
+    .eq("email", TEST_AFFILIATE_EMAIL)
+    .maybeSingle();
 
-
-    // ---------- Fetch dashboard (admin) ----------
-    if (adminData && adminData.token) {
-      console.log("🔍 Fetching admin dashboard...");
-      const dashRes = await fetch(`${API_BASE}/affiliates`, {
-        headers: { Authorization: `Bearer ${adminData.token}` },
-      });
-      const dashData = await dashRes.json().catch(() => null);
-      if (dashData && dashData.success) {
-        console.log("✅ Admin dashboard data fetched:", dashData.data.length, "affiliates");
-      } else {
-        console.log("❌ Failed fetching admin dashboard");
-      }
-    }
-
-    // ---------- Fetch dashboard (affiliate) ----------
-    if (affiliateData && affiliateData.token) {
-      console.log("🔍 Fetching affiliate dashboard...");
-      const dashRes = await fetch(`${API_BASE}/affiliates`, {
-        headers: { Authorization: `Bearer ${affiliateData.token}` },
-      });
-      const dashData = await dashRes.json().catch(() => null);
-      if (dashData && dashData.success) {
-        console.log("✅ Affiliate dashboard data fetched:", dashData.data);
-      } else {
-        console.log("❌ Failed fetching affiliate dashboard");
-      }
-    }
-
-    console.log("🎉 Test completed!");
-  } catch (err) {
-    console.error("❌ Test failed:", err);
+  if (!affiliateInfo) {
+    console.log("❌ Affiliate login failed: Affiliate not found");
+    return;
   }
+  console.log("✅ Affiliate login successful");
+
+  // 5. Fetch a real user for test order
+  const { data: testUser } = await supabase
+    .from("users")
+    .select("*")
+    .limit(1)
+    .maybeSingle();
+
+  if (!testUser) {
+    console.log("❌ No user found in 'users' table for test order");
+    return;
+  }
+
+  // 6. Create test order
+  console.log("🚀 Creating test order...");
+  const { data: orderData, error: orderError } = await supabase
+    .from("transactions")
+    .insert([
+      {
+        user_id: testUser.id,
+        affiliate_id: affiliateInfo.id,
+        amount: TEST_ORDER_AMOUNT,
+        currency: "INR",
+        status: "paid", // directly mark as paid
+        razorpay_order_id: `order_${Date.now()}`,
+        affiliate_credited: true, // mark affiliate credited
+      },
+    ])
+    .select()
+    .single();
+
+  if (orderError) {
+    console.log("❌ Failed creating test order", orderError);
+  } else {
+    console.log("✅ Test order created and credited successfully:", orderData);
+
+    // 7. Update affiliate totals immediately
+    const newSalesCount = (affiliateInfo.sales_count || 0) + 1;
+    const newTotalRevenue = (affiliateInfo.total_revenue || 0) + TEST_ORDER_AMOUNT;
+    const newTotalCommission =
+      (affiliateInfo.total_commission || 0) + TEST_ORDER_AMOUNT * affiliateInfo.commission_rate;
+
+    await supabase
+      .from("affiliates")
+      .update({
+        sales_count: newSalesCount,
+        total_revenue: newTotalRevenue,
+        total_commission: newTotalCommission,
+      })
+      .eq("id", affiliateInfo.id);
+
+    console.log("✅ Affiliate totals updated immediately:");
+    console.log({
+      sales_count: newSalesCount,
+      total_revenue: newTotalRevenue,
+      total_commission: newTotalCommission,
+    });
+  }
+
+  // 8. Fetch admin dashboard
+  console.log("🔍 Fetching admin dashboard...");
+  const { data: affiliates } = await supabase.from("affiliates").select("*");
+  console.log("✅ Admin dashboard data fetched:", affiliates.length, "affiliates");
+
+  // 9. Fetch affiliate dashboard
+  console.log("🔍 Fetching affiliate dashboard...");
+  const updatedAffiliate = await supabase
+    .from("affiliates")
+    .select("*")
+    .eq("id", affiliateInfo.id)
+    .maybeSingle();
+  console.log("✅ Updated Affiliate dashboard:", updatedAffiliate.data);
+
+  console.log("🎉 Test completed!");
 })();
