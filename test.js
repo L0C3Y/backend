@@ -1,21 +1,27 @@
 require("dotenv").config();
 const path = require("path");
 const nodemailer = require("nodemailer");
-const fetch = (...args) => import("node-fetch").then(({default: fetch}) => fetch(...args));
+const fetch = require("node-fetch");
 
 const API_BASE = process.env.VITE_API_URL.replace(/\/+$/, "");
 
-async function safePostJSON(url, body) {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+// Safe POST that handles JSON parsing and errors
+async function safePostJSON(url, bodyObj) {
   try {
-    return await res.json();
-  } catch {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(bodyObj),
+    });
     const text = await res.text();
-    console.error(`❌ Response not JSON for POST ${url}:\n`, text);
+    try {
+      return JSON.parse(text);
+    } catch {
+      console.log(`❌ Response not JSON for POST ${url}:\n`, text);
+      return null;
+    }
+  } catch (err) {
+    console.error("❌ Request failed:", err);
     return null;
   }
 }
@@ -24,13 +30,16 @@ async function safePostJSON(url, body) {
   try {
     console.log("=== Starting Dashboard & Email Test ===");
 
-    // ---------- Email setup ----------
+    // ---------- Setup email transporter ----------
     const transporter = nodemailer.createTransport({
       service: "gmail",
-      auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS, // App password
+      },
     });
 
-    // Buyer email
+    // ---------- Buyer info ----------
     const buyerEmail = "yash2230awm@gmail.com";
     const buyerName = "Snow Buyer";
     const ebookFile = path.join(__dirname, "..", "secure", "prod1.pdf");
@@ -45,10 +54,12 @@ async function safePostJSON(url, body) {
     });
     console.log("✅ Buyer email sent");
 
-    // Affiliate email
+    // ---------- Affiliate info ----------
     const affiliateEmail = "yash2230awm@gmail.com";
-    const affiliateName = "Snow Affiliate";
-    const commissionAmount = 1000 * 0.3;
+    const affiliateName = "Yashi";
+    const commissionRate = 0.3;
+    const saleAmount = 1000;
+    const commissionAmount = saleAmount * commissionRate;
 
     console.log("🚀 Sending affiliate email...");
     await transporter.sendMail({
@@ -62,47 +73,61 @@ async function safePostJSON(url, body) {
     });
     console.log("✅ Affiliate email sent");
 
-    // ---------- Admin login ----------
+    // ---------- Login ----------
+    let adminData = null;
+    let affiliateData = null;
+
     console.log("🚀 Logging in as admin...");
-    const adminData = await safePostJSON(`${API_BASE}/auth/login`, {
+    adminData = await safePostJSON(`${API_BASE}/auth/login`, {
       role: "admin",
       identifier: process.env.ADMIN_USERNAME,
       password: process.env.ADMIN_PASSWORD,
     });
-    if (!adminData || !adminData.success) console.log("❌ Login failed (admin)");
-    else console.log("✅ Admin login successful");
+    if (!adminData || !adminData.success) {
+      console.log("❌ Login failed (admin):", adminData ? adminData.error : "No JSON response");
+    } else {
+      console.log("✅ Admin login successful");
+    }
 
-    // ---------- Affiliate login ----------
     console.log("🚀 Logging in as affiliate...");
-    const affiliateData = await safePostJSON(`${API_BASE}/auth/login`, {
-      role: "affiliate",
-      identifier: affiliateEmail,
-      name: affiliateName,
-    });
-    if (!affiliateData || !affiliateData.success) console.log("❌ Login failed (affiliate)");
-    else console.log("✅ Affiliate login successful");
+affiliateData = await safePostJSON(`${API_BASE}/auth/login`, {
+  role: "affiliate",
+  identifier: affiliateEmail,
+  name: affiliateName,   // <-- required by backend
+});
+if (!affiliateData || !affiliateData.success) {
+  console.log("❌ Login failed (affiliate):", affiliateData ? affiliateData.error : "No JSON response");
+} else {
+  console.log("✅ Affiliate login successful");
+}
 
-    // ---------- Fetch dashboards ----------
-    if (adminData?.token) {
+
+    // ---------- Fetch dashboard (admin) ----------
+    if (adminData && adminData.token) {
       console.log("🔍 Fetching admin dashboard...");
       const dashRes = await fetch(`${API_BASE}/affiliates`, {
         headers: { Authorization: `Bearer ${adminData.token}` },
       });
-      try {
-        const dashData = await dashRes.json();
-        console.log("✅ Admin dashboard data:", dashData.data?.length || 0, "affiliates");
-      } catch { console.log("❌ Failed fetching admin dashboard"); }
+      const dashData = await dashRes.json().catch(() => null);
+      if (dashData && dashData.success) {
+        console.log("✅ Admin dashboard data fetched:", dashData.data.length, "affiliates");
+      } else {
+        console.log("❌ Failed fetching admin dashboard");
+      }
     }
 
-    if (affiliateData?.token) {
+    // ---------- Fetch dashboard (affiliate) ----------
+    if (affiliateData && affiliateData.token) {
       console.log("🔍 Fetching affiliate dashboard...");
       const dashRes = await fetch(`${API_BASE}/affiliates`, {
         headers: { Authorization: `Bearer ${affiliateData.token}` },
       });
-      try {
-        const dashData = await dashRes.json();
-        console.log("✅ Affiliate dashboard data:", dashData.data || []);
-      } catch { console.log("❌ Failed fetching affiliate dashboard"); }
+      const dashData = await dashRes.json().catch(() => null);
+      if (dashData && dashData.success) {
+        console.log("✅ Affiliate dashboard data fetched:", dashData.data);
+      } else {
+        console.log("❌ Failed fetching affiliate dashboard");
+      }
     }
 
     console.log("🎉 Test completed!");
