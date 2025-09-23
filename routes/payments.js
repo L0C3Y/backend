@@ -6,35 +6,45 @@ const authMiddleware = require("../middleware/auth"); // JWT auth
 const { supabase } = require("../db"); // your Supabase client
 const crypto = require("crypto");
 
+// Initialize Razorpay
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID,
   key_secret: process.env.RAZORPAY_KEY_SECRET,
 });
 
-// Public endpoint for frontend
+// ------------------------
+// Public endpoint: get key
+// ------------------------
 router.get("/key", (req, res) => {
   res.json({ key: process.env.RAZORPAY_KEY_ID });
 });
 
+// ------------------------
 // Create order — protected
+// ------------------------
 router.post("/create-order", authMiddleware, async (req, res) => {
   try {
     const { amount, ebookId, affiliateCode } = req.body;
-    const userId = req.user.id;
+    const userId = req.user.id; // must be a UUID
 
-    // Fetch affiliate_id from Supabase if code exists
+    if (!amount || isNaN(amount) || amount <= 0) {
+      return res.status(400).json({ success: false, error: "Invalid amount" });
+    }
+
+    // Fetch affiliate_id from Supabase if referralCode exists
     let affiliateId = null;
     if (affiliateCode) {
       const { data: affData, error: affError } = await supabase
         .from("affiliates")
         .select("id")
-        .eq("code", affiliateCode)
+        .eq("referral_code", affiliateCode)
         .single();
 
       if (affError) console.error("Affiliate fetch error:", affError.message);
       if (affData) affiliateId = affData.id;
     }
 
+    // Razorpay order creation
     const options = {
       amount: amount * 100, // in paise
       currency: "INR",
@@ -43,55 +53,63 @@ router.post("/create-order", authMiddleware, async (req, res) => {
 
     const razorpayOrder = await razorpay.orders.create(options);
 
-    // Save transaction in Supabase
+    // Insert transaction in Supabase
     const { data: transData, error: transError } = await supabase
       .from("transactions")
-      .insert({
-        user_id: userId,
+      .insert([{
+        user_id: userId,          // crucial fix for UUID error
         affiliate_id: affiliateId,
+        ebook_id: ebookId || null,
+        referral_code: affiliateCode || null,
         amount,
         currency: "INR",
         razorpay_order_id: razorpayOrder.id,
         status: "created",
-      })
+      }])
       .select()
       .single();
 
     if (transError) throw new Error(transError.message);
 
-    res.json({
-      success: true,
-      razorpayOrder,
-      order: transData,
-    });
+    res.json({ success: true, razorpayOrder, transaction: transData });
   } catch (err) {
     console.error("Create order error:", err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
+// ------------------------
 // Verify payment — protected
+// ------------------------
 router.post("/verify", authMiddleware, async (req, res) => {
   try {
-    const { razorpay_order_id, razorpay_payment_id, razorpay_signature, orderId } = req.body;
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature, transactionId } = req.body;
 
-    const generated_signature = crypto
+    if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature || !transactionId) {
+      return res.status(400).json({ success: false, error: "Missing required fields" });
+    }
+
+    // Verify Razorpay signature
+    const generatedSignature = crypto
       .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
-      .update(razorpay_order_id + "|" + razorpay_payment_id)
+      .update(`${razorpay_order_id}|${razorpay_payment_id}`)
       .digest("hex");
 
-    if (generated_signature !== razorpay_signature)
-      return res.json({ success: false, error: "Invalid signature" });
+    if (generatedSignature !== razorpay_signature) {
+      return res.status(400).json({ success: false, error: "Invalid signature" });
+    }
 
     // Update transaction as paid
-    const { error } = await supabase
+    const { data: txnData, error: txnError } = await supabase
       .from("transactions")
       .update({ status: "paid", razorpay_payment_id })
-      .eq("id", orderId);
+      .eq("id", transactionId)
+      .select()
+      .single();
 
-    if (error) throw new Error(error.message);
+    if (txnError) throw new Error(txnError.message);
 
-    res.json({ success: true });
+    res.json({ success: true, transaction: txnData });
   } catch (err) {
     console.error("Verify payment error:", err.message);
     res.status(500).json({ success: false, error: err.message });
