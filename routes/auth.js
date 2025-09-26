@@ -1,10 +1,11 @@
+// backend/routes/auth.js
 require("dotenv").config();
 const express = require("express");
 const router = express.Router();
 const bcrypt = require("bcrypt");
+const { supabase } = require("../supabase"); // initialized Supabase client
+const { asyncHandler, validate, body } = require("./middleware");
 const jwt = require("jsonwebtoken");
-const { supabase } = require("../supabase");
-const { asyncHandler, body, validate } = require("./middleware");
 
 // ------------------------
 // Helper: Generate JWT
@@ -24,9 +25,9 @@ router.post(
   "/login",
   validate([
     body("role").notEmpty().isIn(["admin", "affiliate", "user"]),
-    body("identifier").notEmpty(),   // username for admin, email for others
-    body("password").optional(),      // only for admin / registered user
-    body("name").optional(),          // only for affiliate login
+    body("identifier").notEmpty(), // username for admin, email for others
+    body("password").optional(),    // only for admin / registered user
+    body("name").optional(),        // only for affiliate login
   ]),
   asyncHandler(async (req, res) => {
     const { role, identifier, password, name } = req.body;
@@ -47,7 +48,8 @@ router.post(
 
     // ---------- Affiliate Login ----------
     if (role === "affiliate") {
-      if (!name) return res.status(400).json({ success: false, error: "Affiliate name required" });
+      if (!name)
+        return res.status(400).json({ success: false, error: "Affiliate name required" });
 
       const { data: affiliate, error } = await supabase
         .from("affiliates")
@@ -58,16 +60,23 @@ router.post(
         .maybeSingle();
 
       if (error) return res.status(500).json({ success: false, error: error.message });
-      if (!affiliate) return res.status(401).json({ success: false, error: "Affiliate not found" });
+      if (!affiliate)
+        return res.status(401).json({ success: false, error: "Affiliate not found" });
 
-      const user = { id: affiliate.id, name: affiliate.name, email: affiliate.email, role: "affiliate" };
+      const user = {
+        id: affiliate.id,
+        name: affiliate.name,
+        email: affiliate.email,
+        role: "affiliate",
+      };
       const token = generateToken(user);
       return res.json({ success: true, user, token });
     }
 
     // ---------- Registered User Login ----------
     if (role === "user") {
-      if (!password) return res.status(400).json({ success: false, error: "Password required" });
+      if (!password)
+        return res.status(400).json({ success: false, error: "Password required" });
 
       const { data: user } = await supabase
         .from("users")
@@ -84,7 +93,6 @@ router.post(
       return res.json({ success: true, user, token });
     }
 
-    // ---------- Invalid Role ----------
     return res.status(400).json({ success: false, error: "Invalid role" });
   })
 );

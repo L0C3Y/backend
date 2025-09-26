@@ -4,13 +4,14 @@ const express = require("express");
 const cors = require("cors");
 const jwt = require("jsonwebtoken");
 const Razorpay = require("razorpay");
+const crypto = require("crypto");
 
 // Import routers
-const affiliateRoutes = require("./routes/affiliates"); // ensure this path is correct
-const authRoutes = require("./routes/auth"); // your login/register router
+const affiliateRoutes = require("./routes/affiliates");
+const authRoutes = require("./routes/auth");
 
 // Supabase client
-const { supabase } = require("./db");
+const { supabase } = require("./supabase"); // ensure this points to your initialized client
 
 const app = express();
 app.use(express.json());
@@ -23,7 +24,12 @@ const allowedOrigins = [
   "http://localhost:3000",
   "http://localhost:5173",
 ];
-app.use(cors({ origin: (origin, cb) => cb(null, true), credentials: true }));
+app.use(
+  cors({
+    origin: (origin, callback) => callback(null, true),
+    credentials: true,
+  })
+);
 
 // -------------------
 // JWT middleware
@@ -48,7 +54,7 @@ const razorpay = new Razorpay({
 });
 
 // -------------------
-// Payments routes
+// Payment Routes
 // -------------------
 app.get("/api/payments/key", (req, res) => {
   res.json({ key: process.env.RAZORPAY_KEY_ID });
@@ -62,12 +68,12 @@ app.post("/api/payments/create-order", authMiddleware, async (req, res) => {
     // Affiliate lookup
     let affiliateId = null;
     if (affiliateCode) {
-      const { data: affs } = await supabase
+      const { data: affiliate } = await supabase
         .from("affiliates")
         .select("id")
         .eq("referral_code", affiliateCode)
         .maybeSingle();
-      if (affs) affiliateId = affs.id;
+      if (affiliate) affiliateId = affiliate.id;
     }
 
     // Create Razorpay order
@@ -103,11 +109,10 @@ app.post("/api/payments/create-order", authMiddleware, async (req, res) => {
 app.post("/api/payments/verify", authMiddleware, async (req, res) => {
   try {
     const { razorpay_order_id, razorpay_payment_id, razorpay_signature, orderId } = req.body;
-    const crypto = require("crypto");
 
     const generated_signature = crypto
       .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
-      .update(razorpay_order_id + "|" + razorpay_payment_id)
+      .update(`${razorpay_order_id}|${razorpay_payment_id}`)
       .digest("hex");
 
     if (generated_signature !== razorpay_signature)
@@ -128,10 +133,11 @@ app.post("/api/payments/verify", authMiddleware, async (req, res) => {
 });
 
 // -------------------
-// Mount affiliates routes
+// Mount routers
 // -------------------
 app.use("/api/affiliates", affiliateRoutes);
 app.use("/api/auth", authRoutes);
+
 // -------------------
 // Root route
 // -------------------
