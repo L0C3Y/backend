@@ -27,10 +27,9 @@ router.post(
     body("role").notEmpty().isIn(["admin", "affiliate", "user"]),
     body("identifier").notEmpty(), // username for admin, email for others
     body("password").optional(),    // only for admin / registered user
-    body("name").optional(),        // only for affiliate login
   ]),
   asyncHandler(async (req, res) => {
-    const { role, identifier, password, name } = req.body;
+    const { role, identifier, password } = req.body;
 
     // ---------- Admin Login ----------
     if (role === "admin") {
@@ -48,9 +47,6 @@ router.post(
 
     // ---------- Affiliate Login ----------
     if (role === "affiliate") {
-      if (!name)
-        return res.status(400).json({ success: false, error: "Affiliate name required" });
-
       const { data: affiliate, error } = await supabase
         .from("affiliates")
         .select("*")
