@@ -55,7 +55,6 @@ router.post(
         .from("affiliates")
         .select("*")
         .eq("email", identifier)
-        .eq("name", name)
         .eq("deleted", false)
         .maybeSingle();
 
